@@ -40,7 +40,8 @@ cuda = core.cuda
 metal = core.metal
 opengl = core.opengl
 cc = core.cc
-gpu = [cuda, metal, opengl]
+dx = core.dx
+gpu = [cuda, metal, opengl, dx]
 cpu = core.host_arch()
 kernel_profiler_print = lambda: get_runtime().prog.kernel_profiler_print()
 kernel_profiler_clear = lambda: get_runtime().prog.kernel_profiler_clear()
@@ -520,6 +521,7 @@ def is_arch_supported(arch):
         metal: core.with_metal,
         opengl: core.with_opengl,
         cc: core.with_cc,
+        dx: lambda: True,
         cpu: lambda: True
     }
     with_arch = arch_table.get(arch, lambda: False)
@@ -535,7 +537,7 @@ def is_arch_supported(arch):
 
 
 def supported_archs():
-    archs = [cpu, cuda, metal, opengl, cc]
+    archs = [cpu, cuda, metal, opengl, cc, dx]
 
     wanted_archs = os.environ.get('TI_WANTED_ARCHS', '')
     want_exclude = wanted_archs.startswith('^')

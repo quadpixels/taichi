@@ -13,6 +13,9 @@
 #endif
 #include "taichi/backends/metal/codegen_metal.h"
 #include "taichi/backends/opengl/codegen_opengl.h"
+#include "taichi/backends/dx/codegen_dx.h"
+#include "taichi/backends/dx/struct_directx.h"
+#include "taichi/backends/dx/directx_api.h"
 #include "taichi/backends/cpu/codegen_cpu.h"
 #include "taichi/struct/struct.h"
 #include "taichi/struct/struct_llvm.h"
@@ -92,6 +95,11 @@ Program::Program(Arch desired_arch) {
     if (!opengl::is_opengl_api_available()) {
       TI_WARN("No OpenGL API detected.");
       arch = host_arch();
+    }
+  }
+  if (arch == Arch::dx) {
+    if (!dx::is_dx_api_available()) {
+      TI_WARN("No DX API detected.");
     }
   }
 
@@ -219,6 +227,10 @@ FunctionType Program::compile(Kernel &kernel) {
   } else if (kernel.arch == Arch::cc) {
     ret = cccp::compile_kernel(&kernel);
 #endif
+  } else if (kernel.arch == Arch::dx) {
+    dx::DxCodeGen codegen(kernel.name, &dx_struct_compiled_.value(),
+                          dx_kernel_launcher_.get());
+    ret = codegen.Compile(this, &kernel);
   } else {
     TI_NOT_IMPLEMENTED;
   }
@@ -419,6 +431,15 @@ void Program::materialize_layout() {
     result_buffer = allocate_result_buffer_default(this);
     cc_program->compile_layout(snode_root.get());
 #endif
+  } else if (config.arch == Arch::dx) {
+    result_buffer = allocate_result_buffer_default(this);
+    dx::DxStructCompiler sc;
+    sc.Run(snode_root.get());
+    dx_struct_compiled_ = sc.Run(snode_root.get());
+    TI_TRACE("DX root buffer size: {} B", dx_struct_compiled_->root_size);
+    dx_kernel_launcher_ =
+        std::make_unique<dx::HLSLLauncher>(dx_struct_compiled_->root_size);
+    dx_kernel_launcher_->result_buffer = result_buffer;
   }
 }
 
@@ -589,6 +610,8 @@ Arch Program::get_snode_accessor_arch() {
     return Arch::metal;
   } else if (config.arch == Arch::cc) {
     return Arch::cc;
+  } else if (config.arch == Arch::dx) {
+    return Arch::dx;
   } else {
     return get_host_arch();
   }
