@@ -8,9 +8,10 @@ namespace dx {
 
 ID3D11Device *g_device;
 ID3D11DeviceContext *g_context;
-ID3D11Buffer *g_args_i32_buf, *g_args_f32_buf, *g_data_i32_buf, *g_data_f32_buf;
+ID3D11Buffer *g_args_i32_buf, *g_args_f32_buf, *g_data_i32_buf, *g_data_f32_buf,
+  *g_locks_buf;
 ID3D11UnorderedAccessView *g_args_i32_uav, *g_args_f32_uav, *g_data_i32_uav,
-    *g_data_f32_uav;
+    *g_data_f32_uav, *g_locks_uav;
 
 HRESULT CreateComputeDevice(ID3D11Device **out_device,
                             ID3D11DeviceContext **out_context,
@@ -65,6 +66,25 @@ HRESULT CreateStructuredBuffer(ID3D11Device *device,
   desc.ByteWidth = element_size * count;
   desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
   desc.StructureByteStride = element_size;
+  if (init_data) {
+    D3D11_SUBRESOURCE_DATA data;
+    data.pSysMem = init_data;
+    return device->CreateBuffer(&desc, &data, out_buf);
+  } else {
+    return device->CreateBuffer(&desc, nullptr, out_buf);
+  }
+}
+
+
+HRESULT CreateRawBuffer(ID3D11Device *device,
+                        UINT size,
+                        void *init_data,
+                        ID3D11Buffer **out_buf) {
+  *out_buf = nullptr;
+  D3D11_BUFFER_DESC desc = {};
+  desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+  desc.ByteWidth = size;
+  desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
   if (init_data) {
     D3D11_SUBRESOURCE_DATA data;
     data.pSysMem = init_data;
@@ -165,12 +185,17 @@ bool initialize_dx(bool error_tolerance = false) {
     CreateStructuredBuffer(g_device, 4, N, nullptr, &g_data_f32_buf);
     CreateStructuredBuffer(g_device, 4, N, nullptr, &g_args_i32_buf);
     CreateStructuredBuffer(g_device, 4, N, nullptr, &g_args_f32_buf);
+    char *zeroes = new char[N * 4];
+    memset(zeroes, 0x00, N * 4);
+    CreateRawBuffer(g_device, 4 * N, zeroes, &g_locks_buf);
+    delete[] zeroes;
 
     TI_TRACE("Creating D3D11 UAVs");
     CreateBufferUAV(g_device, g_data_i32_buf, &g_data_i32_uav);
     CreateBufferUAV(g_device, g_data_f32_buf, &g_data_f32_uav);
     CreateBufferUAV(g_device, g_args_i32_buf, &g_args_i32_uav);
     CreateBufferUAV(g_device, g_args_f32_buf, &g_args_f32_uav);
+    CreateBufferUAV(g_device, g_locks_buf, &g_locks_uav);
   } else {
     TI_TRACE("D3D11 device has already been created.");
   }
@@ -237,12 +262,13 @@ void CompiledKernel::Impl::dispatch_compute(HLSLLauncher *launcher) const {
 
   // Temporary u0=_data_i32_, u1=_data_f32_, u2=_args_i32_, u3=_args_f32_
   ID3D11UnorderedAccessView *uavs[] = {g_data_i32_uav, g_data_f32_uav,
-                                       g_args_i32_uav, g_args_f32_uav};
+                                       g_args_i32_uav, g_args_f32_uav,
+                                       g_locks_uav};
   g_context->CSSetShader(compute_shader, nullptr, 0);
-  g_context->CSSetUnorderedAccessViews(0, 4, uavs, nullptr);
+  g_context->CSSetUnorderedAccessViews(0, 5, uavs, nullptr);
 
   // FIXME: ps is sometimes invalid
-  UINT num_grids = 1; //ps.get()->grid_dim;
+  UINT num_grids = 1;
   TI_TRACE("num_grids={}", num_grids);
   g_context->Dispatch(num_grids, 1, 1);
   // 2. memory barrier
@@ -283,21 +309,37 @@ CompiledProgram::Impl::Impl(Kernel *kernel) {
   ret_count = kernel->rets.size();
 
   for (int i = 0; i < arg_count; i++) {
-    if (kernel->args[i].is_nparray) {
-      TI_ERROR("ext_arr_map not implemented");
-      TI_NOT_IMPLEMENTED;
+    if (kernel->args[i].is_nparray) { // xv = ti.Vector.field(2, float, 128)
+      ext_arr_map[i] = kernel->args[i].size;
     }
   }
 }
 
 // args UAVs are used both for arguments and return values
 void CompiledProgram::Impl::launch(Context &ctx, HLSLLauncher *launcher) const {
-  TI_TRACE("CompiledProgram launch, ctx.args: {} {} {} {} {} {} {} {}, arg_count={}, ret_count={}", 
+  printf("CompiledProgram launch, %lu kernels in total:\n", kernels.size());
+  int i = 0;
+  for (const auto &kernel : kernels) {
+    printf("%d. %s\n", i, kernel->impl->kernel_name.c_str());
+    i++;
+  }
+  TI_TRACE("ctx.args: {} {} {} {} {} {} {} {}, arg_count={}, ret_count={}", 
     ctx.args[0], ctx.args[1],
-           ctx.args[2], ctx.args[3], ctx.args[4], ctx.args[5], ctx.args[6],
-           ctx.args[7], arg_count, ret_count);
+    ctx.args[2], ctx.args[3], ctx.args[4], ctx.args[5], ctx.args[6],
+    ctx.args[7], arg_count, ret_count);
+  
   std::vector<char> args;
   args.resize(std::max(arg_count, ret_count) * sizeof(uint64_t));
+
+  const int taichi_dx_earg_base = 64; // 8x8; same as taichi_opengl_earg_base
+
+  if (ext_arr_map.size()) {
+    const int extra_size = arg_count * taichi_max_num_indices * sizeof(uint64);
+    args.resize(taichi_dx_earg_base + extra_size);
+    std::memcpy(args.data() + taichi_dx_earg_base, ctx.extra_args,
+      extra_size);
+
+  }
 
   // Copy to the UAVs
   ID3D11Buffer *tmp_arg_buf;
@@ -312,7 +354,7 @@ void CompiledProgram::Impl::launch(Context &ctx, HLSLLauncher *launcher) const {
   HRESULT hr = g_device->CreateBuffer(&tmp_desc, nullptr, &tmp_arg_buf);
   assert(SUCCEEDED(hr));
 
-  // Reinterpret as ints
+  // Reinterpret as uint64s
   int int_args[8];
   for (int i = 0; i < 8; i++) {
     int_args[i] = ctx.get_arg<int>(i);
@@ -340,8 +382,17 @@ void CompiledProgram::Impl::launch(Context &ctx, HLSLLauncher *launcher) const {
 
   // Process return values
   // Very crappy for now
-  // TODO: figure out what the return statements mean.
-  g_context->CopyResource(tmp_arg_buf, g_args_f32_buf);
+  switch (return_buffer_id) {
+    case i32:
+      TI_TRACE("DXX return value is in i32 buf\n");
+      g_context->CopyResource(tmp_arg_buf, g_args_i32_buf);
+      break;
+    case f32:
+      TI_TRACE("DXX return value is in f32 buf\n");
+      g_context->CopyResource(tmp_arg_buf, g_args_f32_buf);
+      break;
+  }
+
   hr = g_context->Map(tmp_arg_buf, 0, D3D11_MAP_READ, 0, &mapped);
   assert(SUCCEEDED(hr));
   memcpy(float_args, mapped.pData, sizeof(float_args));

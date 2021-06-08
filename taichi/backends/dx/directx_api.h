@@ -61,10 +61,17 @@ struct CompiledKernel {
   void dispatch_compute(HLSLLauncher *launcher) const;
 };
 
+enum ReturnBufferId {
+  i32,
+  f32,
+};
+
 struct CompiledProgram {
   struct Impl {
     std::vector<std::unique_ptr<CompiledKernel>> kernels;
     int arg_count, ret_count;
+    std::map<int, size_t> ext_arr_map;
+    ReturnBufferId return_buffer_id;
     Impl(Kernel *kernel);
     void add(const std::string &kernel_name,
              const std::string &kernel_source_code,

@@ -20,6 +20,8 @@ class KernelGen : public IRVisitor {
   Kernel* kernel;
 
  public:
+  ReturnBufferId return_buffer_id;
+
   KernelGen(Kernel* kernel,
     std::string kernel_name,
     StructCompiledResult* struct_compiled
@@ -86,7 +88,7 @@ class KernelGen : public IRVisitor {
 
 
       // No way to obtain thread dimension in kernel in DX it seems
-      int num_thds = gen->ps->block_dim * gen->ps->grid_dim;
+      int num_thds = gen->ps->block_dim * 1; /*gen->ps->grid_dim;*/
       gen->emit("int _sid0 = int(DTid.x);");
       gen->emit("for (int _sid = _sid0; _sid < ({}); _sid += {}) {{",
         iterations, num_thds);
@@ -149,7 +151,7 @@ private:
   void visit(GetRootStmt* stmt) override {
     printf("[GetRootStmt]\n");
     root_stmt_ = stmt;
-    emit("int {} = 0;", stmt->short_name());
+    emit("int {} = 0;", dx_name_fix(stmt->short_name()));
   }
 
   void visit(SNodeLookupStmt* stmt) override {
@@ -168,10 +170,10 @@ private:
 
     TI_ASSERT(parent != nullptr);
 
-    emit("int {} = {} + {} * {}; // {}", stmt->short_name(),
-         parent->short_name(),
+    emit("int {} = {} + {} * {}; // {}", dx_name_fix(stmt->short_name()),
+         dx_name_fix(parent->short_name()),
          struct_compiled_->snode_map.at(parent_type).elem_stride,
-         stmt->input_index->short_name(), stmt->snode->node_type_name);
+         dx_name_fix(stmt->input_index->short_name()), stmt->snode->node_type_name);
 
     if (stmt->activate) {
       if (stmt->snode->type == SNodeType::dense) {
@@ -184,10 +186,12 @@ private:
 
   // <*gen> $367 = getchild[s0root->s1dense] $366
   // int N = M + 0
+  // <*gen> $34 = get child [S0root->S1dense] $33
+  // int Ay = Ax + 0; // S1
   void visit(GetChStmt* stmt) override {
     printf("[GetChStmt]\n");
-    emit("int {} = {} + {}; // {}", stmt->short_name(),
-         stmt->input_ptr->short_name(),
+    emit("int {} = {} + {}; // {}", dx_name_fix(stmt->short_name()),
+         dx_name_fix(stmt->input_ptr->short_name()),
          struct_compiled_->snode_map.at(stmt->input_snode->node_type_name)
              .children_offsets[stmt->chid],
          stmt->output_snode->node_type_name);
@@ -201,8 +205,8 @@ private:
     auto dt = stmt->data->element_type();
     emit("_{}_{}_[{} >> {}] = {};",
          ptr_signats.at(stmt->ptr->id),  // throw out_of_range if not a pointer
-         dx_data_type_short_name(dt), stmt->ptr->short_name(),
-         dx_data_address_shifter(dt), stmt->data->short_name());
+         dx_data_type_short_name(dt), dx_name_fix(stmt->ptr->short_name()),
+         dx_data_address_shifter(dt), dx_name_fix(stmt->data->short_name()));
   }
 
   void visit(GlobalLoadStmt* stmt) override {
@@ -212,7 +216,7 @@ private:
     emit("{} {} = _{}_{}_[{} >> {}];",
       dx_data_type_name(stmt->element_type()), stmt->short_name(),
       ptr_signats.at(stmt->ptr->id), dx_data_type_short_name(dt),
-      stmt->ptr->short_name(), dx_data_address_shifter(dt));
+      dx_name_fix(stmt->ptr->short_name()), dx_data_address_shifter(dt));
   }
 
   void visit(ExternalPtrStmt* stmt) override {
@@ -224,36 +228,69 @@ private:
     std::string dt_name = dx_data_type_name(stmt->element_type());
     switch (stmt->op_type) {
       case UnaryOpType::logic_not: {
-        emit("{} {} = {}({} == 0);", dt_name, stmt->short_name(), dt_name,
-          stmt->operand->short_name());
+        emit("{} {} = {}({} == 0);",
+          dt_name, dx_name_fix(stmt->short_name()), dt_name,
+          dx_name_fix(stmt->operand->short_name()));
         break;
       }
       case UnaryOpType::cast_value: {
-        emit("{} {} = {}({});", dt_name, stmt->short_name(),
-          dx_data_type_name(stmt->cast_type), stmt->operand->short_name());
+        emit("{} {} = {}({});",
+          dt_name,
+          dx_name_fix(stmt->short_name()),
+          dx_data_type_name(stmt->cast_type),
+          dx_name_fix(stmt->operand->short_name()));
+        break;
+      }
+      case UnaryOpType::floor: {
+        emit("{} {} = {}({}({}));",
+          dt_name, dx_name_fix(stmt->short_name()), dt_name,
+          unary_op_type_name(stmt->op_type), 
+          dx_name_fix(stmt->operand->short_name()));
+        break;
+      }
+      case UnaryOpType::neg: {
+        emit("{} {} = {}(-{});", dt_name, dx_name_fix(stmt->short_name()),
+             dt_name, stmt->operand->short_name());
         break;
       }
       default: {
+        printf("%s is not implemented\n", unary_op_type_name(stmt->op_type).c_str());
         TI_NOT_IMPLEMENTED;
       }
     }
   }
 
   void visit(BinaryOpStmt* bin) override {
-    printf("[BinaryOpStmt]\n");
+    printf("[BinaryOpStmt] %d\n", bin->op_type);
     const std::string dt_name = dx_data_type_name(bin->element_type());
-    const std::string lhs_name = bin->lhs->short_name();
-    const std::string rhs_name = bin->rhs->short_name();
-    const std::string bin_name = bin->short_name();
+    const std::string lhs_name = dx_name_fix(bin->lhs->short_name());
+    const std::string rhs_name = dx_name_fix(bin->rhs->short_name());
+    const std::string bin_name = dx_name_fix(bin->short_name());
     const std::string binop = binary_op_type_symbol(bin->op_type);
 
     switch (bin->op_type) {
       case BinaryOpType::floordiv: {
-        TI_NOT_IMPLEMENTED;
-        break;
+        TI_WARN(
+            "floordiv called! It should be taken care by demote_operations");
+        if (is_integral(bin->lhs->element_type()) &&
+            is_integral(bin->rhs->element_type())) {
+          emit(
+              "{} {} = {}(sign({}) * {} >= 0 ? abs({}) / abs({}) : sign({}) * "
+              "(abs({}) + abs({}) - 1) / {});",
+              dt_name, bin_name, dt_name, lhs_name, rhs_name, lhs_name,
+              rhs_name, lhs_name, lhs_name, rhs_name, rhs_name);
+          return;
+        }
+        // NOTE: the 1e-6 here is for precision reason, or `7 // 7` will obtain
+        // 0 instead of 1
+        emit(
+            "{} {} = {}(floor((float({}) * (1 + sign({} * {}) * 1e-6)) / "
+            "float({})));",
+            dt_name, bin_name, dt_name, lhs_name, lhs_name, rhs_name, rhs_name);
+        return;
       }
       case BinaryOpType::mod: {
-        TI_NOT_IMPLEMENTED;
+        emit("{} {} = {} % {} XXXXXXXXXXXXXX;", dt_name, bin_name, lhs_name, rhs_name);
         break;
       }
       case BinaryOpType::atan2: {
@@ -265,14 +302,81 @@ private:
         break;
       }
       default: {
-        emit("{} {} = {} {} {};", dt_name, bin_name, lhs_name, binop, rhs_name);
+        if (is_dx_binary_op_infix(bin->op_type)) {
+          // This affects the MOD operator
+          // (why is a % b converted a - a / b * b ?)
+          if (is_dx_binary_op_different_return_type(bin->op_type) ||
+              bin->element_type() != bin->lhs->element_type() ||
+              bin->element_type() != bin->rhs->element_type()) {
+            if (is_comparison(bin->op_type)) {
+              emit("{} {} = -{}({} {} {}); // haha", dt_name, bin_name, dt_name,
+                   lhs_name, binop, rhs_name);
+            } else {
+              emit("{} {} = {}({} {} {});", dt_name, bin_name, dt_name,
+                   lhs_name, binop, rhs_name);
+            }
+          } else {
+            emit("{} {} = {} {} {};", dt_name, bin_name, lhs_name, binop,
+                 rhs_name);
+          }
+        } else {
+          // function call
+          TI_NOT_IMPLEMENTED;
+        }
+
         break;
       }
     }
   }
 
   void visit(AtomicOpStmt* stmt) override {
-    printf("[AtomicOpStmt]\n");
+    TI_ASSERT(stmt->width() == 1);
+    auto dt = stmt->dest->element_type().ptr_removed();
+
+    {
+      if (dt != PrimitiveType::f32) {
+        TI_ERROR("Unsupported atomic operation for primitive type: {}",
+                 dx_data_type_short_name(dt));
+      } else {
+        std::string atomic_op = "";
+        switch (stmt->op_type) { 
+        case AtomicOpType::add:
+          atomic_op = "atomicAdd";
+          break;
+        case AtomicOpType::sub:
+          atomic_op = "atomicAdd";
+          break;
+        case AtomicOpType::max:
+          atomic_op = "atomicMax";
+          break;
+        case AtomicOpType::min:
+          atomic_op = "atomicMin";
+          break;
+        case AtomicOpType::bit_and:
+          atomic_op = "atomicAnd";
+          break;
+        case AtomicOpType::bit_or:
+          atomic_op = "atomicOr";
+          break;
+        case AtomicOpType::bit_xor:
+          atomic_op = "atomicXor";
+          break;
+        default:
+          TI_NOT_IMPLEMENTED;
+          break;
+        }
+
+        emit("{} {} = {}_{}_{}({} >> {}, {}{});",
+            dx_data_type_name(stmt->val->element_type()),
+            dx_name_fix(stmt->short_name()),
+            atomic_op,
+            ptr_signats.at(stmt->dest->id),
+            dx_data_type_short_name(dt),
+            stmt->dest->short_name(), dx_data_address_shifter(dt),
+            (stmt->op_type == AtomicOpType::sub ? "-" : ""),
+            stmt->val->short_name(), stmt->short_name());
+      }
+    }
   }
 
   void visit(TernaryOpStmt* tri) override {
@@ -295,14 +399,21 @@ private:
   void visit(ConstStmt* const_stmt) override {
     printf("[ConstStmt]\n");
     std::string dt_name = dx_data_type_name(const_stmt->element_type());
-    emit("{} {} = {}({});", dt_name, const_stmt->short_name(), dt_name,
-         const_stmt->val[0].stringify());
+    emit("{} {} = {}({});", dt_name, dx_name_fix(const_stmt->short_name()),
+      dt_name, const_stmt->val[0].stringify());
   }
 
   void visit(KernelReturnStmt* stmt) override {
     printf("[KernelReturnStmt]\n");
-    emit("_args_{}_[0] = {};", dx_data_type_short_name(stmt->element_type()),
-         stmt->value->short_name());
+    emit("_args_{}_[0] = {};",
+        dx_data_type_short_name(stmt->element_type()),
+        dx_name_fix(stmt->value->short_name()));
+    if (stmt->element_type()->is_primitive(PrimitiveTypeID::f32) ||
+        stmt->element_type()->is_primitive(PrimitiveTypeID::f64)) {
+      this->return_buffer_id = f32;
+    } else {
+      this->return_buffer_id = i32;
+    }
   }
 
   // stmt->short_name() <- data
@@ -311,11 +422,16 @@ private:
     const std::string dt = dx_data_type_name(stmt->element_type());
 
     if (stmt->is_ptr) {
-      TI_ERROR("Pointer is not yet supported");
+      emit("int {} = _args_i32_[{} << 1]; // is ext pointer {}",
+        dx_name_fix(stmt->short_name()), stmt->arg_id, dt);
     } else {
       if (dt == "int" || dt == "float") {
-        emit("{} {} = _args_{}32_[{}];", dt, stmt->short_name(), dt[0],
-             stmt->arg_id);
+        emit("{} {} = _args_{}32_[{} << {}];",
+          dt, dx_name_fix(stmt->short_name()),
+          dt[0],
+          stmt->arg_id,
+          0
+        );
       } else {
         TI_ERROR("Data type {} is not yet supported", dt);
       }
@@ -332,17 +448,17 @@ private:
     if (stmt->loop->is<OffloadedStmt>()) {
       auto type = stmt->loop->as<OffloadedStmt>()->task_type;
       if (type == OffloadedStmt::TaskType::range_for) {
-        emit("int {} = _itv;", stmt->short_name());
+        emit("int {} = _itv;", dx_name_fix(stmt->short_name()));
       }
       else if (type == OffloadedStmt::TaskType::struct_for) {
-        emit("int {} = _itv; // struct for", stmt->short_name());
+        emit("int {} = _itv; // struct for", dx_name_fix(stmt->short_name()));
       }
       else {
         TI_NOT_IMPLEMENTED
       }
     }
     else if (stmt->loop->is<RangeForStmt>()) {
-      emit("int {} = {};", stmt->short_name(), stmt->loop->short_name());
+      emit("int {} = {};", dx_name_fix(stmt->short_name()), dx_name_fix(stmt->loop->short_name()));
     }
     else {
       TI_NOT_IMPLEMENTED;
@@ -370,6 +486,23 @@ private:
     emit("RWStructuredBuffer<float> _data_f32_ : register(u1);");
     emit("RWStructuredBuffer<int> _args_i32_ : register(u2);");
     emit("RWStructuredBuffer<float> _args_f32_ : register(u3);");
+    emit("RWByteAddressBuffer locks : register(u4);");
+
+    // Atomic ops
+    emit("float atomicAdd_data_f32(int addr, float val) {{");
+    emit("  bool done = false;");
+    emit("  int reti; float ret;");
+    emit("  while (!done) {{");
+    emit("    locks.InterlockedCompareExchange(addr, 0, 1, reti);");
+    emit("    if (reti == 0) {{");
+    emit("      ret = _data_f32_[addr];");
+    emit("      _data_f32_[addr] = ret + val;");
+    emit("      done = true;");
+    emit("      locks.Store(addr, 0);");
+    emit("    }}");
+    emit("  }}");
+    emit("  return ret;");
+    emit("}}");
   }
 
   void generate_bottom() {
@@ -475,7 +608,7 @@ private:
 
   void visit(IfStmt* if_stmt) override {
     printf("[IfStmt]\n");
-    emit("if ({} != 0) {{", if_stmt->cond->short_name());
+    emit("if ({} != 0) {{", dx_name_fix(if_stmt->cond->short_name()));
     if (if_stmt->true_statements) {
       if_stmt->true_statements->accept(this);
     }
@@ -497,13 +630,18 @@ void DummyFunc(Context& ctx) {
 
 FunctionType DxCodeGen::Compile(Program* program, Kernel* kernel) {
   {
+    bool verbose = false;
+    char *v = getenv("VERBOSE");
+    if (v && std::atoi(v) > 0) {
+      verbose = true;
+    }
     printf("[compile] Lowering the IR\n");
     auto ir = kernel->ir.get();
     auto& config = kernel->program.config;
     config.demote_dense_struct_fors = true;
     irpass::compile_to_executable(ir, config,
         false, kernel->grad,
-        false, config.print_ir,
+        false, verbose,//config.print_ir,
         true,
         config.make_thread_local);
     irpass::print(ir);
@@ -515,12 +653,15 @@ FunctionType DxCodeGen::Compile(Program* program, Kernel* kernel) {
   std::unique_ptr<CompiledProgram> compiled =
       std::move(kg.get_compiled_program());
   taichi::lang::dx::CompiledProgram *ptr = compiled.get();
+  ptr->impl->return_buffer_id = kg.return_buffer_id;
 
   // Pass the ownership of the std::unique_ptr to the kernel launcher
   kernel_launcher_->keep(std::move(compiled));
 
-  return [ptr, launcher = kernel_launcher_](Context& ctx) { 
-    printf("[DxCodeGen] We should launch a DX kernel now %p\n", &ctx);
+  std::string kernel_name = kernel->name;
+
+  return [ptr, launcher = kernel_launcher_, kernel_name](Context& ctx) { 
+    printf("[DxCodeGen] We should launch a DX kernel %s\n", kernel_name.c_str());
     ptr->launch(ctx, launcher);
   };
 }

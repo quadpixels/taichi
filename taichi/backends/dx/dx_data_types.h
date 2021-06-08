@@ -27,6 +27,17 @@ inline std::string dx_data_type_name(DataType dt) {
   }
 }
 
+inline bool is_dx_binary_op_infix(BinaryOpType type) {
+  return !((type == BinaryOpType::min) || (type == BinaryOpType::max) ||
+           (type == BinaryOpType::atan2) || (type == BinaryOpType::pow));
+}
+
+inline bool is_dx_binary_op_different_return_type(BinaryOpType type) {
+  return (type == BinaryOpType::cmp_ne) || (type == BinaryOpType::cmp_eq) ||
+         (type == BinaryOpType::cmp_lt) || (type == BinaryOpType::cmp_gt) ||
+         (type == BinaryOpType::cmp_le) || (type == BinaryOpType::cmp_ge);
+}
+
 inline int dx_get_snode_meta_size(const SNode *snode) {
   if (snode->type == SNodeType::dynamic) {
     return sizeof(int);
@@ -46,6 +57,18 @@ inline int dx_data_address_shifter(DataType type) {
   } else {
     TI_NOT_IMPLEMENTED
   }
+}
+
+inline std::string dx_name_fix(const std::string &name) {
+  std::string ret = name, l;
+  for (char c : name) {
+    c = ::tolower(c);
+    l.push_back(c);
+  }
+  if (l == "asm") {
+    ret.push_back('_');
+  }
+  return ret;
 }
 
 }  // namespace dx
