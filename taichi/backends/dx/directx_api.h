@@ -20,6 +20,8 @@ class Kernel;
 
 namespace dx {
 
+const int taichi_dx_earg_base = 64;  // 8x8; same as taichi_opengl_earg_base
+
 struct HLSLLauncher;
 
 HRESULT CreateComputeDevice(ID3D11Device **device,
@@ -62,8 +64,10 @@ struct CompiledKernel {
 };
 
 enum ReturnBufferId {
-  i32,
-  f32,
+  data_i32,
+  data_f32,
+  extr_i32,
+  extr_f32,
 };
 
 struct CompiledProgram {

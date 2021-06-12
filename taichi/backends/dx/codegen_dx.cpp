@@ -88,7 +88,7 @@ class KernelGen : public IRVisitor {
 
 
       // No way to obtain thread dimension in kernel in DX it seems
-      int num_thds = gen->ps->block_dim * 1; /*gen->ps->grid_dim;*/
+      int num_thds = gen->ps->block_dim * gen->ps->grid_dim;
       gen->emit("int _sid0 = int(DTid.x);");
       gen->emit("for (int _sid = _sid0; _sid < ({}); _sid += {}) {{",
         iterations, num_thds);
@@ -200,27 +200,87 @@ private:
   }
 
   void visit(GlobalStoreStmt* stmt) override {
+    std::string buf_name = ptr_signats.at(stmt->ptr->id);
+    auto dt = stmt->data->element_type();
+    char dtname0 = dx_data_type_short_name(dt)[0];
+
     printf("[GlobalStoreStmt]\n");
     TI_ASSERT(stmt->width() == 1);
-    auto dt = stmt->data->element_type();
+    
     emit("_{}_{}_[{} >> {}] = {};",
-         ptr_signats.at(stmt->ptr->id),  // throw out_of_range if not a pointer
-         dx_data_type_short_name(dt), dx_name_fix(stmt->ptr->short_name()),
-         dx_data_address_shifter(dt), dx_name_fix(stmt->data->short_name()));
+          buf_name,  // throw out_of_range if not a pointer
+          dx_data_type_short_name(dt), dx_name_fix(stmt->ptr->short_name()),
+          dx_data_address_shifter(dt), dx_name_fix(stmt->data->short_name()));
+
+    // Todo: This one is a temporary stop-gap solution & might need
+    // to be changed in the future
+    if (buf_name == "extr") {
+      if (dtname0 == 'f')
+        this->return_buffer_id = extr_f32;
+      else
+        this->return_buffer_id = extr_i32;
+    } else {
+      if (dtname0 == 'f')
+        this->return_buffer_id = data_f32;
+      else
+        this->return_buffer_id = data_i32;
+    }
   }
 
   void visit(GlobalLoadStmt* stmt) override {
-    printf("[GlobalLoadStmt]\n");
     TI_ASSERT(stmt->width() == 1);
     auto dt = stmt->element_type();
+    
+    std::string buf_name = ptr_signats.at(stmt->ptr->id);
+
     emit("{} {} = _{}_{}_[{} >> {}];",
       dx_data_type_name(stmt->element_type()), stmt->short_name(),
-      ptr_signats.at(stmt->ptr->id), dx_data_type_short_name(dt),
+      buf_name, dx_data_type_short_name(dt),
       dx_name_fix(stmt->ptr->short_name()), dx_data_address_shifter(dt));
+
+    char dtname0 = dx_data_type_short_name(dt)[0];
+
+    printf("[GlobalLoadStmt] %s %c\n", buf_name.c_str(), dtname0);
+
   }
 
+  // Needed by to_numpy()
   void visit(ExternalPtrStmt* stmt) override {
     printf("[ExternalPtrStmt]\n");
+
+    TI_ASSERT(stmt->width() == 1);
+    const auto linear_index_name = fmt::format("_li_{}",
+      dx_name_fix(stmt->short_name()));
+    emit("int {} = 0;", linear_index_name);
+    emit("{{ // linear seek");
+    {
+      ScopedIndent _s(line_appender_);
+      const auto *argload = stmt->base_ptrs[0]->as<ArgLoadStmt>();
+      const int arg_id = argload->arg_id;
+      const int num_indices = stmt->indices.size();
+      std::vector<std::string> size_var_names;
+      for (int i = 0; i < num_indices; i++) {
+
+        std::string var_name =
+            fmt::format("_s{}_{}", i, dx_name_fix(stmt->short_name()));
+        emit("int {} = _args_i32_[{} + {} * {} + {}];",
+          var_name, 
+          taichi_dx_earg_base / sizeof(int), arg_id,
+          taichi_max_num_indices, i);
+        size_var_names.push_back(std::move(var_name));
+      }
+      for (int i = 0; i < num_indices; i++) {
+        emit("{} *= {};", linear_index_name, size_var_names[i]);
+        emit("{} += {};", linear_index_name, 
+          dx_name_fix(stmt->indices[i]->short_name()));
+      }
+    }
+    emit("}}");
+
+    emit("int {} = {} + ({} << {});", dx_name_fix(stmt->short_name()),
+         dx_name_fix(stmt->base_ptrs[0]->short_name()), linear_index_name,
+         dx_data_address_shifter(stmt->base_ptrs[0]->element_type()));
+    ptr_signats[stmt->id] = "extr";
   }
 
   void visit(UnaryOpStmt* stmt) override {
@@ -309,7 +369,7 @@ private:
               bin->element_type() != bin->lhs->element_type() ||
               bin->element_type() != bin->rhs->element_type()) {
             if (is_comparison(bin->op_type)) {
-              emit("{} {} = -{}({} {} {}); // haha", dt_name, bin_name, dt_name,
+              emit("{} {} = -{}({} {} {});", dt_name, bin_name, dt_name,
                    lhs_name, binop, rhs_name);
             } else {
               emit("{} {} = {}({} {} {});", dt_name, bin_name, dt_name,
@@ -410,9 +470,9 @@ private:
         dx_name_fix(stmt->value->short_name()));
     if (stmt->element_type()->is_primitive(PrimitiveTypeID::f32) ||
         stmt->element_type()->is_primitive(PrimitiveTypeID::f64)) {
-      this->return_buffer_id = f32;
+      this->return_buffer_id = data_f32;
     } else {
-      this->return_buffer_id = i32;
+      this->return_buffer_id = data_i32;
     }
   }
 
@@ -486,7 +546,9 @@ private:
     emit("RWStructuredBuffer<float> _data_f32_ : register(u1);");
     emit("RWStructuredBuffer<int> _args_i32_ : register(u2);");
     emit("RWStructuredBuffer<float> _args_f32_ : register(u3);");
-    emit("RWByteAddressBuffer locks : register(u4);");
+    emit("RWStructuredBuffer<int> _extr_i32_ : register(u4);");
+    emit("RWStructuredBuffer<float> _extr_f32_ : register(u5);");
+    emit("RWByteAddressBuffer locks : register(u6);");
 
     // Atomic ops
     emit("float atomicAdd_data_f32(int addr, float val) {{");
@@ -498,7 +560,8 @@ private:
     emit("      ret = _data_f32_[addr];");
     emit("      _data_f32_[addr] = ret + val;");
     emit("      done = true;");
-    emit("      locks.Store(addr, 0);");
+    emit("      int tmp;");
+    emit("      locks.InterlockedExchange(addr, 0, tmp);");
     emit("    }}");
     emit("  }}");
     emit("  return ret;");
@@ -661,7 +724,6 @@ FunctionType DxCodeGen::Compile(Program* program, Kernel* kernel) {
   std::string kernel_name = kernel->name;
 
   return [ptr, launcher = kernel_launcher_, kernel_name](Context& ctx) { 
-    printf("[DxCodeGen] We should launch a DX kernel %s\n", kernel_name.c_str());
     ptr->launch(ctx, launcher);
   };
 }
