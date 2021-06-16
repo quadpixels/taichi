@@ -88,7 +88,7 @@ class KernelGen : public IRVisitor {
 
 
       // No way to obtain thread dimension in kernel in DX it seems
-      int num_thds = gen->ps->block_dim * gen->ps->grid_dim;
+      int num_thds = gen->ps->block_dim * 1; /*gen->ps->grid_dim;*/
       gen->emit("int _sid0 = int(DTid.x);");
       gen->emit("for (int _sid = _sid0; _sid < ({}); _sid += {}) {{",
         iterations, num_thds);
@@ -390,6 +390,7 @@ private:
   }
 
   void visit(AtomicOpStmt* stmt) override {
+    printf("[AtomicOpStmt]\n");
     TI_ASSERT(stmt->width() == 1);
     auto dt = stmt->dest->element_type().ptr_removed();
 
@@ -434,7 +435,7 @@ private:
             dx_data_type_short_name(dt),
             stmt->dest->short_name(), dx_data_address_shifter(dt),
             (stmt->op_type == AtomicOpType::sub ? "-" : ""),
-            stmt->val->short_name(), stmt->short_name());
+            stmt->val->short_name());
       }
     }
   }
@@ -554,14 +555,16 @@ private:
     emit("float atomicAdd_data_f32(int addr, float val) {{");
     emit("  bool done = false;");
     emit("  int reti; float ret;");
+    emit("  [allow_uav_condition]");
     emit("  while (!done) {{");
-    emit("    locks.InterlockedCompareExchange(addr, 0, 1, reti);");
+    emit("    int lock_idx = (addr % 1048576) * 4;");
+    emit("    locks.InterlockedCompareExchange(lock_idx, 0, 1, reti);");
     emit("    if (reti == 0) {{");
     emit("      ret = _data_f32_[addr];");
     emit("      _data_f32_[addr] = ret + val;");
-    emit("      done = true;");
     emit("      int tmp;");
-    emit("      locks.InterlockedExchange(addr, 0, tmp);");
+    emit("      locks.InterlockedExchange(lock_idx, 0, tmp);");
+    emit("      done = true;");
     emit("    }}");
     emit("  }}");
     emit("  return ret;");
@@ -597,6 +600,12 @@ private:
   }
 
   void generate_range_for_kernel(OffloadedStmt* stmt) {
+
+    char *x = getenv("SINGLE_THREADED");
+    if (x && std::atoi(x) > 0) {
+      stmt->block_dim = std::atoi(x);
+    }
+
     TI_ASSERT(stmt->task_type == OffloadedStmt::TaskType::range_for);
     const std::string dx_kernel_name = fmt::format("kernel_{}", kernel_serial);
     emit("void {}(uint3 DTid)", dx_kernel_name);

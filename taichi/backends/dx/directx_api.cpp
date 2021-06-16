@@ -451,7 +451,15 @@ void CompiledProgram::Impl::launch(Context &ctx, HLSLLauncher *launcher) const {
   assert(SUCCEEDED(hr));
   memcpy(mapped.pData, int_args, sizeof(int_args));
   g_context->Unmap(tmp_arg_buf, 0);
-  g_context->CopyResource(g_args_i32_buf, tmp_arg_buf);
+  D3D11_BOX copy_range = {0};
+  copy_range.left = 0;
+  copy_range.right = LEN * sizeof(int);
+  copy_range.top = 0;
+  copy_range.bottom = 1;
+  copy_range.front = 0;
+  copy_range.back = 1;
+  g_context->CopySubresourceRegion(g_args_i32_buf, 0, 0, 0, 0, tmp_arg_buf, 0,
+                                   &copy_range);
 
   float float_args[8];
   for (int i = 0; i < 8; i++) {
@@ -461,7 +469,9 @@ void CompiledProgram::Impl::launch(Context &ctx, HLSLLauncher *launcher) const {
   assert(SUCCEEDED(hr));
   memcpy(mapped.pData, float_args, sizeof(float_args));
   g_context->Unmap(tmp_arg_buf, 0);
-  g_context->CopyResource(g_args_f32_buf, tmp_arg_buf);
+  copy_range.right = 8 * sizeof(float);
+  g_context->CopySubresourceRegion(g_args_f32_buf, 0, 0, 0, 0, tmp_arg_buf, 0,
+                                   &copy_range);
 
   std::chrono::time_point<std::chrono::steady_clock> t1 =
       std::chrono::steady_clock::now();
@@ -473,6 +483,9 @@ void CompiledProgram::Impl::launch(Context &ctx, HLSLLauncher *launcher) const {
 
   // Process return values
   // Very crappy for now
+
+  // TODO: specify a correct return size
+  copy_range.right = 32768;
 
   if (should_print) {
     switch (return_buffer_id) {
@@ -493,16 +506,20 @@ void CompiledProgram::Impl::launch(Context &ctx, HLSLLauncher *launcher) const {
 
   switch (return_buffer_id) {
     case data_i32:
-      g_context->CopyResource(tmp_arg_buf, g_args_i32_buf);
+      g_context->CopySubresourceRegion(tmp_arg_buf, 0, 0, 0, 0, g_args_i32_buf,
+                                       0, &copy_range);
       break;
     case data_f32:
-      g_context->CopyResource(tmp_arg_buf, g_args_f32_buf);
+      g_context->CopySubresourceRegion(tmp_arg_buf, 0, 0, 0, 0, g_args_f32_buf,
+                                       0, &copy_range);
       break;
     case extr_i32:
-      g_context->CopyResource(tmp_arg_buf, g_extr_i32_buf);
+      g_context->CopySubresourceRegion(tmp_arg_buf, 0, 0, 0, 0, g_extr_i32_buf,
+                                       0, &copy_range);
       break;
     case extr_f32:
-      g_context->CopyResource(tmp_arg_buf, g_extr_f32_buf);
+      g_context->CopySubresourceRegion(tmp_arg_buf, 0, 0, 0, 0, g_extr_f32_buf,
+                                       0, &copy_range);
       break;
   }
 
