@@ -465,6 +465,7 @@ void CompiledProgram::Impl::launch(Context &ctx, HLSLLauncher *launcher) const {
   for (int i = 0; i < 8; i++) {
     float_args[i] = ctx.get_arg<float>(i);
   }
+
   hr = g_context->Map(tmp_arg_buf, 0, D3D11_MAP_WRITE, 0, &mapped);
   assert(SUCCEEDED(hr));
   memcpy(mapped.pData, float_args, sizeof(float_args));
@@ -535,6 +536,7 @@ void CompiledProgram::Impl::launch(Context &ctx, HLSLLauncher *launcher) const {
   for (int i = 0; i < ret_count; i++) {
     ptr[i] = *(reinterpret_cast<uint64_t*>(&float_args[i]));
   }
+  g_context->Unmap(tmp_arg_buf, 0);
 
   std::chrono::time_point<std::chrono::steady_clock> t3 =
       std::chrono::steady_clock::now();
