@@ -85,10 +85,8 @@ class KernelGen : public IRVisitor {
           gen->ps->grid_dim = 256;
         }
       }
-
-
-      // No way to obtain thread dimension in kernel in DX it seems
-      int num_thds = gen->ps->block_dim * 1; /*gen->ps->grid_dim;*/
+      
+      int num_thds = gen->ps->block_dim * gen->ps->grid_dim;
       gen->emit("int _sid0 = int(DTid.x);");
       gen->emit("for (int _sid = _sid0; _sid < ({}); _sid += {}) {{",
         iterations, num_thds);
@@ -543,8 +541,8 @@ private:
   }
 
   void generate_header() {
-    emit("RWStructuredBuffer<int> _data_i32_ : register(u0);");
-    emit("RWStructuredBuffer<float> _data_f32_ : register(u1);");
+    emit("globallycoherent RWStructuredBuffer<int> _data_i32_ : register(u0);");
+    emit("globallycoherent RWStructuredBuffer<float> _data_f32_ : register(u1);");
     emit("RWStructuredBuffer<int> _args_i32_ : register(u2);");
     emit("RWStructuredBuffer<float> _args_f32_ : register(u3);");
     emit("RWStructuredBuffer<int> _extr_i32_ : register(u4);");
@@ -555,7 +553,6 @@ private:
     emit("float atomicAdd_data_f32(int addr, float val) {{");
     emit("  bool done = false;");
     emit("  int reti; float ret;");
-    emit("  [allow_uav_condition]");
     emit("  while (!done) {{");
     emit("    int lock_idx = (addr % 1048576) * 4;");
     emit("    locks.InterlockedCompareExchange(lock_idx, 0, 1, reti);");

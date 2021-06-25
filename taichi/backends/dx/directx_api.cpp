@@ -246,7 +246,7 @@ void CompiledKernel::dispatch_compute(HLSLLauncher *launcher) const {
 CompiledKernel::Impl::Impl(const std::string &kernel_name,
                            const std::string &kernel_source_code,
                            std::unique_ptr<ParallelSize> ps_)
-    : kernel_name(kernel_name), ps(std::move(ps)), compute_shader(nullptr) {
+    : kernel_name(kernel_name), ps(std::move(ps_)), compute_shader(nullptr) {
   printf("CompiledKernel::Impl ctor\n");
   printf("kernel_name: %s\n", kernel_name.c_str());
   printf("kernel_source_code: %s\n", kernel_source_code.c_str());
@@ -297,9 +297,8 @@ void CompiledKernel::Impl::dispatch_compute(HLSLLauncher *launcher) const {
   g_context->CSSetShader(compute_shader, nullptr, 0);
   g_context->CSSetUnorderedAccessViews(0, 7, uavs, nullptr);
 
-  // FIXME: ps is sometimes invalid
-  UINT num_grids = 1;
-  g_context->Dispatch(num_grids, 1, 1);
+  TI_TRACE("dispatch_compute<<<{},{}>>>", ps->grid_dim, ps->block_dim);
+  g_context->Dispatch(ps->grid_dim, 1, 1);
   // 2. memory barrier
 
 
