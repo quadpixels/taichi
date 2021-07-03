@@ -276,16 +276,22 @@ CompiledKernel::Impl::Impl(const std::string &kernel_name,
 
 void CompiledKernel::Impl::dispatch_compute(HLSLLauncher *launcher) const {
   // 1. set shader
-  bool SHOULD_PRINT = false;
+  bool should_print = false;
 
-  if (SHOULD_PRINT)
-    TI_TRACE("CompiledKernel::Impl::dispatch_compute");
+  char *x = getenv("VERBOSE");
+  if (x && std::atoi(x) == 1) {
+    should_print = true;
+  }
+
+  if (should_print) {
+    TI_TRACE("dispatch_compute<<<{},{}>>>", ps->grid_dim, ps->block_dim);
+  }
 
   // debug
   size_t nbytes;
   float *f32_data0 = nullptr;
   
-  if (SHOULD_PRINT) {
+  if (should_print) {
     f32_data0 = (float *)(DumpBuffer(g_data_f32_buf, &nbytes));
   }
 
@@ -297,53 +303,11 @@ void CompiledKernel::Impl::dispatch_compute(HLSLLauncher *launcher) const {
   g_context->CSSetShader(compute_shader, nullptr, 0);
   g_context->CSSetUnorderedAccessViews(0, 7, uavs, nullptr);
 
-  TI_TRACE("dispatch_compute<<<{},{}>>>", ps->grid_dim, ps->block_dim);
   g_context->Dispatch(ps->grid_dim, 1, 1);
   // 2. memory barrier
 
 
-  if (SHOULD_PRINT) {
-    // debug
-    float *f32_data1 = (float *)DumpBuffer(g_data_f32_buf, nullptr);
-
-    printf("data_f32_data before vs after\n");
-    int num_diff = 0;
-    for (int i = 0; i < nbytes / 4; i++) {
-      float b0 = f32_data0[i], b1 = f32_data1[i];
-      if (b0 != b1) {
-        num_diff++;
-        if (num_diff <= 10) {
-          printf("[%d]: %g vs %g\n", i, b0, b1);
-        }
-      }
-    }
-    printf("%d differences in total\n", num_diff);
-
-    printf("data_f32 first 100 elts:");
-    for (int i = 0; i < 100; i++) {
-      printf("%g ", f32_data1[i]);
-    }
-    printf("\n");
-
-    printf("extr_f32 first 100 elts:");
-    float *f32_extr = (float *)DumpBuffer(g_extr_f32_buf, nullptr);
-    for (int i = 0; i < 100; i++) {
-      printf("%g ", f32_extr[i]);
-    }
-    printf("\n");
-
-    printf("extr_i32 first 100 elts:");
-    float *i32_extr = (float *)DumpBuffer(g_extr_i32_buf, nullptr);
-    for (int i = 0; i < 100; i++) {
-      printf("%d ", *(reinterpret_cast<int *>(&(i32_extr[i]))));
-    }
-    printf("\n");
-
-    delete f32_data0;
-    delete f32_data1;
-    delete f32_extr;
-    delete i32_extr;
-  }
+  
 }
 
 // CompiledProgram, CompiledProgram::Impl
@@ -394,17 +358,15 @@ void CompiledProgram::Impl::launch(Context &ctx, HLSLLauncher *launcher) const {
       printf("%d. %s\n", i, kernel->impl->kernel_name.c_str());
       i++;
     }
-    TI_TRACE("ctx.args: {} {} {} {} {} {} {} {}, arg_count={}, ret_count={}", 
-      ctx.args[0], ctx.args[1],
-      ctx.args[2], ctx.args[3], ctx.args[4], ctx.args[5], ctx.args[6],
-      ctx.args[7], arg_count, ret_count);
+    TI_TRACE("ctx.args: {} {} {} {} {} {} {} {}, arg_count={}, ret_count={}",
+             ctx.args[0], ctx.args[1], ctx.args[2], ctx.args[3], ctx.args[4],
+             ctx.args[5], ctx.args[6], ctx.args[7], arg_count, ret_count);
 
-    TI_TRACE("ctx.extra_args: {} {} {} {} {} {} {} {}",
-             ctx.extra_args[0][0], ctx.extra_args[0][1],
-             ctx.extra_args[0][2], ctx.extra_args[0][3],
-             ctx.extra_args[0][4], ctx.extra_args[0][5],
-             ctx.extra_args[0][6], ctx.extra_args[0][7]);
-    }
+    TI_TRACE("ctx.extra_args: {} {} {} {} {} {} {} {}", ctx.extra_args[0][0],
+             ctx.extra_args[0][1], ctx.extra_args[0][2], ctx.extra_args[0][3],
+             ctx.extra_args[0][4], ctx.extra_args[0][5], ctx.extra_args[0][6],
+             ctx.extra_args[0][7]);
+  }
   
   std::vector<char> args;
   args.resize(std::max(arg_count, ret_count) * sizeof(uint64_t));
@@ -412,7 +374,7 @@ void CompiledProgram::Impl::launch(Context &ctx, HLSLLauncher *launcher) const {
   // TODO: add support for read extr buffer
   // TODO: add support for writing >1 extr buffers
   void *extptr = nullptr;
-  size_t extsize = 0;
+  size_t extsize = 256; // Should be at least this much for a return buffer
 
   if (ext_arr_map.size()) {
     const size_t extra_size = arg_count * size_t(taichi_max_num_indices) * sizeof(uint64);
@@ -424,9 +386,6 @@ void CompiledProgram::Impl::launch(Context &ctx, HLSLLauncher *launcher) const {
       extptr = (void *)ctx.args[ext_arr_map.begin()->first];
       extsize = ext_arr_map.begin()->second;
       ctx.args[ext_arr_map.begin()->first] = 0; // otherwise all 0s
-      if (should_print) {
-        printf("extsize=%d\n", int(extsize));
-      }
     } else {
       TI_NOT_IMPLEMENTED;
     }
@@ -478,14 +437,14 @@ void CompiledProgram::Impl::launch(Context &ctx, HLSLLauncher *launcher) const {
   for (const auto &kernel : kernels) {
     kernel->dispatch_compute(launcher);
   }
-  std::chrono::time_point<std::chrono::steady_clock> t2 =
+  std::chrono::time_point<std::chrono::steady_clock> t2 = 
       std::chrono::steady_clock::now();
 
   // Process return values
   // Very crappy for now
 
-  // TODO: specify a correct return size
-  copy_range.right = 32768;
+  // TODO: specify a correct return size for non-ext copies
+  copy_range.right = extsize;
 
   if (should_print) {
     switch (return_buffer_id) {
@@ -543,9 +502,11 @@ void CompiledProgram::Impl::launch(Context &ctx, HLSLLauncher *launcher) const {
       std::chrono::duration_cast<std::chrono::microseconds>(t3 - t0).count();
   int ms_kernels =
       std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
-  printf("Kernel %s, %g ms all, %g ms kernel-only\n",
-         this->kernels[0]->impl->kernel_name.c_str(), ms_all / 1000.0f,
-         ms_kernels / 1000.0f);
+  if (should_print) {
+    printf("Kernel %s, %g ms all, %g ms kernel-only\n",
+           this->kernels[0]->impl->kernel_name.c_str(), ms_all / 1000.0f,
+           ms_kernels / 1000.0f);
+  }
 }
 
 void CompiledProgram::add(const std::string &kernel_name,
